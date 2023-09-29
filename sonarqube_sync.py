@@ -1,23 +1,14 @@
-#!/usr/bin/env python3
-
 from datetime import datetime
 import os
-import sys
 import json
 import time
 import requests
+import logging
 
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
 
 class SonarQubeSync(object):
-
-    sonarqube_url = ""
-    sonarqube_token = ""
-    jira_url = ""
-    jira_token = ""
-    project_key = ""
-    disclosure = False
-    # Analyze every ~1 minute
-    analysis_frequency = 70
 
     def __init__(self):
         self.sonarqube_url = os.getenv("SONARQUBE_URL")
@@ -25,26 +16,10 @@ class SonarQubeSync(object):
         self.jira_url = os.getenv("JIRA_URL")
         self.jira_token = os.getenv("JIRA_ENCODED_TOKEN")
         self.project_key = os.getenv("JIRA_PROJECT_KEY")
-        if self.sonarqube_url is None:
-            raise Exception("SONARQUBE_URL environment variable is not set.")
-            sys.exit(10)
-        if self.sonarqube_token is None:
-            raise Exception("ENCODED_SONAR_TOKEN environment variable is not set.")
-            sys.exit(11)
-        if self.jira_url is None:
-            raise Exception("JIRA_URL environment variable is not set.")
-            sys.exit(12)
-        if self.jira_token is None:
-            raise Exception("JIRA_ENCODED_TOKEN environment variable is not set.")
-            sys.exit(13)
-        print("SonarQube URL: {}".format(self.sonarqube_url))
-        if self.disclosure:
-            print("SonarQube Token: {}".format(self.sonarqube_token))
-
-    def __del__(self):
-        pass
-
-    # Gets all vulnerabilities for a project
+        
+        if not all([self.sonarqube_url, self.sonarqube_token, self.jira_url, self.jira_token, self.project_key]):
+            logger.error("One or more environment variables are not set.")
+        
     def sq_get_project_vulnerabilities(self, project_key=""):
         if project_key == "":
             url = f"{self.sonarqube_url}/api/issues/search?types=VULNERABILITY"
@@ -106,7 +81,6 @@ class SonarQubeSync(object):
                 response = requests.post(f'{self.jira_url}/rest/api/3/issue/{issue_key}/comment', headers=headers, data=json.dumps(payload))
                 response.raise_for_status()
 
-    # Determines whether to create or update Jira tickets
     def create_and_update_jira_tickets(self, project_key=""):
         data_json = self.sq_get_project_vulnerabilities(project_key)
         for item in data_json["issues"]:
@@ -150,7 +124,6 @@ class SonarQubeSync(object):
 
         return data_json
 
-    # Creates a Jira ticket
     def jira_create_ticket(self, project_key, summary, description, issue_type):
         url = self.jira_url + "/rest/api/2/issue"
 
@@ -182,9 +155,7 @@ class SonarQubeSync(object):
             print(f"Failed to create Jira ticket. Status code: {response.status_code}")
             return None
 
-    # Boolean to check whether a ticket already exists
     def jira_ticket_already_exists(self, key, hash):
-
         url = self.jira_url + "/rest/api/3/search"
         description = f"{key}:{hash}"
 
@@ -215,7 +186,6 @@ class SonarQubeSync(object):
         else:
             return True
 
-    # Updates Jira tickets when SonarQube issues are closed
     def update_issues(self, project_key=""):
         data_json = self.sq_get_project_vulnerabilities(project_key)
         for item in data_json["issues"]:
@@ -227,10 +197,8 @@ class SonarQubeSync(object):
                     print("done tag already exists for {}:{}.".format(item["key"], item["hash"]))
             else:
                 print("Issue is not closed in SonarQube, {}:{}.".format(item["key"], item["hash"]))
-            
-    # Closes Jira tickets
-    def jira_cleanup_ticket(self, key, hash):
 
+    def jira_cleanup_ticket(self, key, hash):
         headers = {
             'Content-Type': 'application/json',
             'Authorization': f'Basic {self.jira_token}',
@@ -279,7 +247,6 @@ class SonarQubeSync(object):
         else:
             print("Unable to find Jira ticket for {}:{}.".format(key, hash))
 
-    # Adds a `done` tag to SonarQube issues
     def sq_cleanup_issue(self, key, tags):
         url = f"{self.sonarqube_url}/api/issues/set_tags"
         headers = {"Authorization": f"Basic {self.sonarqube_token}", 
@@ -297,7 +264,6 @@ class SonarQubeSync(object):
         response.raise_for_status()
         return response.status_code
 
-    # Removes the `done` tag from a SonarQube issue
     def sq_reset_issue(self, key):
         url = f"{self.sonarqube_url}/api/issues/tags"
         headers = {"Authorization": f"Basic {self.sonarqube_token}", 
@@ -332,7 +298,6 @@ class SonarQubeSync(object):
         # Raise an exception if the request was unsuccessful
         response.raise_for_status()
 
-    # Get a list of SonarQube projects and their data
     def sq_get_projects_data(self):
         url = f"{self.sonarqube_url}/api/projects/search"
         headers = {"Authorization": f"Basic {self.sonarqube_token}", 
@@ -347,7 +312,6 @@ class SonarQubeSync(object):
         return projects_json
 
     def sq_get_last_analysis_time(self, project_key):
-
         url_analysis = f"{self.sonarqube_url}/api/project_analyses/search?project={project_key}"
         headers = {"Authorization": f"Basic {self.sonarqube_token}", 
                    "Accept": "application/json"}
@@ -367,20 +331,20 @@ class SonarQubeSync(object):
             
             return last_analysis_timestamp
 
-    def sq_analyze_sonarqube_last_analysis_time(self):
+    def sq_analyze_sonarqube_last_analysis_time(self, event, context):
         projects = self.sq_get_projects_data()
         for project in projects:
             project_key = project['key']
             last_analysis_timestamp = self.sq_get_last_analysis_time(project_key)
             seconds_ago = time.time() - last_analysis_timestamp
             if self.analysis_frequency > seconds_ago:
-                print(f"Project {project_key} was last analyzed {seconds_ago} seconds ago. Reviewing now.")
+                logger.info(f"Project {project_key} was last analyzed {seconds_ago} seconds ago. Reviewing now.")
                 self.sq_analyze_project(project_key)
 
     def sq_analyze_project(self, project_key):
         self.create_and_update_jira_tickets(project_key)
 
 
-if __name__ == "__main__":
+def lambda_handler(event, context):
     sonarqube_sync = SonarQubeSync()
-    sonarqube_sync.sq_analyze_sonarqube_last_analysis_time()
+    sonarqube_sync.sq_analyze_sonarqube_last_analysis_time(event, context)
